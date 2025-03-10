@@ -1,5 +1,14 @@
 # PowerShell Setup Script for Development Environment
-# Requirements: Run as Administrator
+#@echo off && powershell -Command "& {Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/IGLS-NickNieto/Software_Installs/main/workflow_py_wsl.ps1' -OutFile 'workflow_py_wsl.ps1'}" && powershell -ExecutionPolicy Bypass -File workflow_py_wsl.ps1
+# Auto-elevates to administrator if needed
+
+# Self-elevate if not already running as administrator
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Relaunching as administrator..." -ForegroundColor Yellow
+    $arguments = "& '" + $MyInvocation.MyCommand.Definition + "'"
+    Start-Process powershell -Verb RunAs -ArgumentList $arguments
+    Exit
+}
 
 # Enable ANSI Colors
 $Host.UI.RawUI.ForegroundColor = "Cyan"
@@ -16,104 +25,187 @@ function Install-Choco {
             [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
             Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
             
+            # Refresh environment variables to make choco available in current session
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+            
             if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
-                throw "Chocolatey installation failed!"
+                Write-Host "Chocolatey installation may have succeeded, but command not available in current session." -ForegroundColor Yellow
+                Write-Host "Will attempt to continue using full path..." -ForegroundColor Yellow
             }
         }
         catch {
             Write-Host "Error installing Chocolatey: $_" -ForegroundColor Red
-            exit 1
+            Write-Host "Please try to install Chocolatey manually and then re-run this script." -ForegroundColor Red
+            Pause
+            return $false
         }
     } else {
         Write-Host "Chocolatey already installed." -ForegroundColor Green
     }
+    return $true
 }
 
-# Function to Check if Package is Installed
-function Test-PackageInstalled {
+# Function to Check if Package is Installed via Chocolatey
+function Test-ChocoPackageInstalled {
     param ($packageName)
-    $chocoList = (choco list --local-only) -join " "
-    return $chocoList -match $packageName
+    $chocoPath = "C:\ProgramData\chocolatey\bin\choco.exe"
+    if (!(Test-Path $chocoPath)) {
+        $chocoPath = "choco"
+    }
+    $output = & $chocoPath list --local-only $packageName 2>$null
+    return $output -match "$packageName\s+\d+"
 }
 
 # Function to Install a Package
-function Install-Package {
-    param ($packageName, $commandName = $packageName)
+function Install-ChocoPackage {
+    param (
+        $packageName,
+        $checkCommand = $null
+    )
     
-    if (!(Test-PackageInstalled $packageName)) {
-        Write-Host "Installing $packageName..." -ForegroundColor Yellow
-        $result = choco install $packageName -y
-        
-        # Verify installation
-        if (!(Test-PackageInstalled $packageName)) {
-            Write-Host "Failed to install $packageName. Exiting." -ForegroundColor Red
-            exit 1
-        }
+    # First check via command if provided
+    $commandExists = $false
+    if ($checkCommand) {
+        $commandExists = Get-Command $checkCommand -ErrorAction SilentlyContinue
+    }
+    
+    if ($commandExists) {
+        Write-Host "$packageName is already installed (command '$checkCommand' exists)." -ForegroundColor Green
+        return $true
+    }
+    
+    # Then check via chocolatey
+    if (Test-ChocoPackageInstalled $packageName) {
+        Write-Host "$packageName is already installed via Chocolatey." -ForegroundColor Green
+        return $true
+    }
+    
+    # If not installed, proceed with installation
+    Write-Host "Installing $packageName..." -ForegroundColor Yellow
+    $chocoPath = "C:\ProgramData\chocolatey\bin\choco.exe"
+    if (!(Test-Path $chocoPath)) {
+        $chocoPath = "choco"
+    }
+    & $chocoPath install $packageName -y
+    
+    # Verify installation
+    if (Test-ChocoPackageInstalled $packageName) {
         Write-Host "$packageName installed successfully." -ForegroundColor Green
+        return $true
     } else {
-        Write-Host "$packageName is already installed." -ForegroundColor Green
+        Write-Host "Warning: $packageName installation may have failed." -ForegroundColor Yellow
+        Write-Host "Continuing with setup..." -ForegroundColor Yellow
+        return $false
     }
 }
 
-# Install Chocolatey
-Install-Choco
+# Function to ensure a directory is in the PATH
+function Ensure-PathContains {
+    param (
+        [string]$Directory
+    )
+    
+    if (!(Test-Path $Directory -ErrorAction SilentlyContinue)) {
+        Write-Host "Directory $Directory does not exist." -ForegroundColor Yellow
+        return $false
+    }
+    
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
+    
+    if ($currentPath -notlike "*$Directory*") {
+        try {
+            [Environment]::SetEnvironmentVariable("Path", $currentPath + ";" + $Directory, [EnvironmentVariableTarget]::Machine)
+            $env:Path = $env:Path + ";" + $Directory
+            Write-Host "Added $Directory to system PATH." -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Failed to add $Directory to PATH: $_" -ForegroundColor Red
+            return $false
+        }
+    } else {
+        Write-Host "$Directory is already in system PATH." -ForegroundColor Green
+        return $true
+    }
+}
 
-# Install Required Packages
-Install-Package "git"
-Install-Package "make"
-Install-Package "miniconda3"
-Install-Package "docker-desktop"
-# Check if repomix is a valid package before installing
-$repomixExists = choco find repomix
+# Function to check and install WSL
+function Install-WSL {
+    Write-Host "Checking Windows Subsystem for Linux (WSL)..." -ForegroundColor Cyan
+    
+    # Check if WSL is enabled by examining the list of WSL distros
+    $wslEnabled = $false
+    try {
+        $wslOutput = wsl --list 2>&1
+        # If WSL is enabled but no distros are installed, this command succeeds but gives a message
+        $wslEnabled = $true
+    } catch {
+        # An error indicates WSL is not enabled
+        $wslEnabled = $false
+    }
+    
+    if (!$wslEnabled) {
+        Write-Host "Enabling Windows Subsystem for Linux..." -ForegroundColor Yellow
+        try {
+            # Enable the WSL Windows feature
+            Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart
+            # Install WSL 2
+            wsl --install
+            Write-Host "WSL installation initiated. A restart may be required to complete the installation." -ForegroundColor Yellow
+            return $false  # Indicate that a restart is recommended
+        } catch {
+            Write-Host "Error enabling WSL: $_" -ForegroundColor Red
+            Write-Host "You may need to enable Windows Subsystem for Linux manually through Windows Features." -ForegroundColor Yellow
+            return $false
+        }
+    } else {
+        Write-Host "WSL is already installed." -ForegroundColor Green
+        return $true
+    }
+}
+
+# Main execution flow
+$chocoInstalled = Install-Choco
+if (!$chocoInstalled) {
+    Write-Host "Cannot proceed without Chocolatey. Please install manually and retry." -ForegroundColor Red
+    Pause
+    Exit 1
+}
+
+# Refresh environment to make sure choco is available
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+# Install packages (with command verification if available)
+Install-ChocoPackage "git" "git"
+Install-ChocoPackage "make" "make"
+Install-ChocoPackage "miniconda3"
+Install-ChocoPackage "docker-desktop"
+
+# Check if repomix is a valid package before attempting to install
+$chocoPath = "C:\ProgramData\chocolatey\bin\choco.exe"
+if (!(Test-Path $chocoPath)) { $chocoPath = "choco" }
+$repomixExists = & $chocoPath search repomix
 if ($repomixExists -match "repomix") {
-    Install-Package "repomix"
+    Install-ChocoPackage "repomix"
 } else {
     Write-Host "Package 'repomix' not found in Chocolatey repository. Skipping." -ForegroundColor Yellow
 }
 
 # Ensure Miniconda is in PATH
 $condaPath = "C:\ProgramData\Miniconda3\Scripts"
-if (!(Test-Path $condaPath)) {
-    Write-Host "Miniconda installation not found at expected location!" -ForegroundColor Red
-    Write-Host "Please check the installation path manually." -ForegroundColor Yellow
-} else {
-    $currentPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Machine)
-    if (!($currentPath -like "*$condaPath*")) {
-        [System.Environment]::SetEnvironmentVariable("Path", $currentPath + ";" + $condaPath, [System.EnvironmentVariableTarget]::Machine)
-        Write-Host "Miniconda added to system PATH." -ForegroundColor Green
-    } else {
-        Write-Host "Miniconda already in system PATH." -ForegroundColor Green
-    }
-}
+$condaPathAdded = Ensure-PathContains $condaPath
 
-# Enable WSL
-Write-Host "Checking Windows Subsystem for Linux (WSL)..." -ForegroundColor Cyan
-try {
-    $wslInstalled = $false
-    $wslOutput = wsl --list 2>&1
-    if ($wslOutput -notmatch "Windows Subsystem for Linux has no installed distributions") {
-        $wslInstalled = $true
-    }
-} catch {
-    $wslInstalled = $false
-}
-
-if (!$wslInstalled) {
-    Write-Host "Enabling WSL..." -ForegroundColor Yellow
-    try {
-        wsl --install
-        Write-Host "WSL installation initiated. A system restart may be required to complete." -ForegroundColor Yellow
-    } catch {
-        Write-Host "Error enabling WSL: $_" -ForegroundColor Red
-    }
-} else {
-    Write-Host "WSL is already installed." -ForegroundColor Green
-}
+# Install WSL if needed
+$wslReady = Install-WSL
 
 # Final Message
 Write-Host "=============================================" -ForegroundColor Cyan
-Write-Host "  Setup Complete! Please restart your PC."
+if (!$wslReady -or !$condaPathAdded) {
+    Write-Host "  Setup Complete! Please restart your PC for"
+    Write-Host "  all changes to take effect."
+} else {
+    Write-Host "  Setup Complete!"
+}
 Write-Host "=============================================" -ForegroundColor Cyan
 
-
-#@echo off && powershell -Command "& {Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/IGLS-NickNieto/Software_Installs/main/workflow_py_wsl.ps1' -OutFile 'workflow_py_wsl.ps1'}" && powershell -ExecutionPolicy Bypass -File workflow_py_wsl.ps1
+Pause
