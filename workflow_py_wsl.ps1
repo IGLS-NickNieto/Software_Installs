@@ -114,3 +114,6 @@ if (!$wslInstalled) {
 Write-Host "=============================================" -ForegroundColor Cyan
 Write-Host "  Setup Complete! Please restart your PC."
 Write-Host "=============================================" -ForegroundColor Cyan
+
+
+#@echo off && powershell -Command "& {Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/IGLS-NickNieto/Software_Installs/main/workflow_py_wsl.ps1' -OutFile 'workflow_py_wsl.ps1'}" && powershell -ExecutionPolicy Bypass -File workflow_py_wsl.ps1
