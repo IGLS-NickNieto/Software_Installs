@@ -74,14 +74,6 @@ if ($quickAssistPackage -or ($quickAssistCapability.State -eq "Installed")) {
         Write-Log "Reboot required after Quick Assist removal."
     }
     
-    # Force KACE inventory update
-    try {
-        Write-Host "Forcing KACE inventory update..."
-        Write-Log "Forcing KACE inventory update."
-        & "C:\Program Files\Quest\KACE\runkbot.exe" 4 0
-    } catch {
-        Write-Log "Error running KACE inventory update: $($_.Exception.Message)"
-    }
 } else {
     Write-Host "Quick Assist is not installed."
     Write-Log "Quick Assist is not installed. No action taken."
